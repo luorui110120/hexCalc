@@ -1,3 +1,3 @@
 空道    16进制计算器
 ///打包成应用的命令
-pyinstaller --onefile --noconsole -F calc.py --icon=Calculator.icns
+可直接执行  buildapp.sh 脚本打包出 可执行程序;
