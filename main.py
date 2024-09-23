@@ -20,6 +20,7 @@ import struct
 
 logging.basicConfig(format="%(filename)s %(lineno)s %(funcName)s %(asctime)s %(name)s:%(levelname)s:%(message)s", datefmt="%Y-%m-%d %H:%M:%S", level=logging.FATAL)
 g_talbeadd_list = []
+g_create_count = 1
 
 class FontNoneDlg(QDialog, Ui_Dialog):
     sendSignal = pyqtSignal(int, str, str)  # 自定义信号
@@ -80,6 +81,10 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
         self.shl_right_textEdit.textChanged.connect(self.calc_shl_textEdit_changed)
         self.shr_left_textEdit.textChanged.connect(self.calc_shr_textEdit_changed)
         self.shr_right_textEdit.textChanged.connect(self.calc_shr_textEdit_changed)
+        self.lsl_left_textEdit.textChanged.connect(self.calc_lsl_textEdit_changed)
+        self.lsl_right_textEdit.textChanged.connect(self.calc_lsl_textEdit_changed)
+        self.ror_left_textEdit.textChanged.connect(self.calc_ror_textEdit_changed)
+        self.ror_right_textEdit.textChanged.connect(self.calc_ror_textEdit_changed)
         self.mod_left_textEdit.textChanged.connect(self.calc_mod_textEdit_changed)
         self.mod_right_textEdit.textChanged.connect(self.calc_mod_textEdit_changed)
         self.ord_ord_textEdit.textChanged.connect(self.ord_ord_textEdit_changed)
@@ -101,14 +106,14 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
     # tab(标签)关闭函数；
     def close_tab(self, index) -> None:
         logging.debug('index:%d' % index)
-        if self.count() - 1 != index:
+        if self.count() - 1 != index and (QMessageBox.Yes == QMessageBox.information(self, "title", "是否要关闭[%s]标签" % self.tabText(index), QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)):
             self.setCurrentIndex(index - 1)
             g_talbeadd_list.pop(index)
             self.removeTab(index)
 
     # tab 发生切换
     def tab_change(self, index) -> None:
-
+        global g_create_count
         # ps这个current index  是从左到右依次增加的
         logging.debug('tabchange index:%d' %self.currentIndex())
         if self.count() - 1 == self.currentIndex():
@@ -116,7 +121,8 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
             #tab_3.setupUi(self)
             #current_index = self.currentIndex()
             g_talbeadd_list.insert(index, tab_3)
-            self.insertTab(index, tab_3.tab, 'Tab%d'% (index+ 1))
+            g_create_count += 1
+            self.insertTab(index, tab_3.tab, 'Tab%d'% (g_create_count))
             self.setCurrentIndex(index)
 
     # double_clicked；
@@ -192,6 +198,51 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
         right_str = self.shr_right_textEdit.toPlainText()
         if len(left_str) > 0 and len(right_str) > 0:
             self.calc_func(self.shr_left_textEdit, self.shr_right_textEdit, self.shr_eq_textEdit, '>>')
+
+    def calc_lsl_textEdit_changed(self):
+        left_str = self.lsl_left_textEdit.toPlainText().strip()
+        right_str = self.lsl_right_textEdit.toPlainText().strip()
+        if len(left_str) > 0 and len(right_str) > 0:
+            #left_str = left_str.toPlainText().strip()
+            #right_str = right_str.toPlainText().strip()
+            data = left_str + right_str
+            if re.match('\A[0-9a-fxA-FX]+\Z', data) is None:
+                self.lsl_eq_textEdit.setText("illegal character")
+                return
+            try:
+                if len(left_str) > 0 and len(right_str) > 0:
+                    leftint = int(left_str, 16)
+                    rightint = int(right_str, 16)
+                    outend = 0
+                    if leftint < 0x100000000:
+                        outend = ((leftint >> (32 - rightint)) | (leftint << rightint)) & 0xffffffff
+                    else:
+                        outend = (leftint >> (64 - rightint)) | (leftint << rightint)
+                    self.lsl_eq_textEdit.setText("0x%x" % (outend & ((1 << 64) - 1)))
+            except Exception as e:
+                self.lsl_eq_textEdit.setText("illegal character")
+    def calc_ror_textEdit_changed(self):
+        left_str = self.ror_left_textEdit.toPlainText().strip()
+        right_str = self.ror_right_textEdit.toPlainText().strip()
+        if len(left_str) > 0 and len(right_str) > 0:
+            # left_str = left_str.toPlainText().strip()
+            # right_str = right_str.toPlainText().strip()
+            data = left_str + right_str
+            if re.match('\A[0-9a-fxA-FX]+\Z', data) is None:
+                self.ror_eq_textEdit.setText("illegal character")
+                return
+            try:
+                if len(left_str) > 0 and len(right_str) > 0:
+                    leftint = int(left_str, 16)
+                    rightint = int(right_str, 16)
+                    outend = 0
+                    if leftint < 0x100000000:
+                        outend = ((leftint << (32 - rightint)) | (leftint >> rightint)) & 0xffffffff
+                    else:
+                        outend = (leftint << (64 - rightint)) | (leftint >> rightint)
+                    self.ror_eq_textEdit.setText("0x%x" % (outend & ((1 << 64) - 1)))
+            except Exception as e:
+                self.ror_eq_textEdit.setText("illegal character")
     def calc_mod_textEdit_changed(self):
         left_str = self.mod_left_textEdit.toPlainText()
         right_str = self.mod_right_textEdit.toPlainText()
