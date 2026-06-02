@@ -24,6 +24,22 @@ logging.basicConfig(format="%(filename)s %(lineno)s %(funcName)s %(asctime)s %(n
 g_talbeadd_list = []
 g_create_count = 1
 
+ERR_PREFIX = "⚠ "
+def err(msg): return ERR_PREFIX + msg
+
+ERR_HEX_CHAR    = err("非法 hex 字符")
+ERR_DIV_ZERO    = err("除数为 0")
+ERR_SHIFT_NEG   = err("位数为负")
+ERR_NOT_NUMBER  = err("非数字")
+ERR_LEB_HEX     = err("LEB hex 非法")
+ERR_LEB_OVER    = err("LEB 长度 > 5 字节")
+ERR_FLOAT_BAD   = err("非法浮点数")
+ERR_FLOAT_OVER  = err("超出 float32 范围")
+ERR_TS_RANGE    = err("超出时间范围")
+ERR_DATE_FMT    = err("日期格式错误 (YYYY-MM-DD HH:MM:SS[.fff])")
+def err_overflow(width):  return err("超出 %d 位范围" % width)
+def err_shift_over(width): return err("位数 ≥ %d" % width)
+
 OP_TABLE = {
     'add':  {'label': '+',    'inputs': ['add_left_textEdit', 'add_right_textEdit'], 'outputs': ['add_eq_textEdit']},
     'sub':  {'label': '-',    'inputs': ['sub_left_textEdit', 'sub_right_textEdit'], 'outputs': ['sub_eq_textEdit']},
@@ -261,18 +277,24 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
             self._ts_signal_lock = False
         self._on_ts_changed()
 
+    def _set_locked(self, widget, text):
+        self._ts_signal_lock = True
+        try:
+            widget.setPlainText(text)
+        finally:
+            self._ts_signal_lock = False
+
     def _on_ts_changed(self):
         if self._ts_signal_lock:
             return
         ts_str = self.ts_textEdit.toPlainText().strip()
         if not ts_str:
-            self._ts_signal_lock = True
-            try:
-                self.date_textEdit.setPlainText("")
-            finally:
-                self._ts_signal_lock = False
+            self._set_locked(self.date_textEdit, "")
             return
         if not self.ts_textEdit.hasFocus():
+            return
+        if re.match(r'\A-?\d+\Z', ts_str) is None:
+            self._set_locked(self.date_textEdit, ERR_NOT_NUMBER)
             return
         try:
             ts_val = int(ts_str)
@@ -282,18 +304,10 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
                 date_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(seconds)) + (".%03d" % ms)
             else:
                 date_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts_val))
-        except (ValueError, OSError, OverflowError):
-            self._ts_signal_lock = True
-            try:
-                self.date_textEdit.setPlainText("illegal character")
-            finally:
-                self._ts_signal_lock = False
+        except (OSError, OverflowError, ValueError):
+            self._set_locked(self.date_textEdit, ERR_TS_RANGE)
             return
-        self._ts_signal_lock = True
-        try:
-            self.date_textEdit.setPlainText(date_str)
-        finally:
-            self._ts_signal_lock = False
+        self._set_locked(self.date_textEdit, date_str)
         self._record_history('ts_to_date', [ts_str, self._ts_unit], date_str)
 
     def _on_date_changed(self):
@@ -301,11 +315,7 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
             return
         date_str = self.date_textEdit.toPlainText().strip()
         if not date_str:
-            self._ts_signal_lock = True
-            try:
-                self.ts_textEdit.setPlainText("")
-            finally:
-                self._ts_signal_lock = False
+            self._set_locked(self.ts_textEdit, "")
             return
         if not self.date_textEdit.hasFocus():
             return
@@ -313,29 +323,25 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
         date_main = date_str
         if '.' in date_str:
             date_main, frac = date_str.rsplit('.', 1)
-            try:
-                ms_part = int((frac + '000')[:3])
-            except ValueError:
-                ms_part = 0
+            if not frac.isdigit():
+                self._set_locked(self.ts_textEdit, ERR_DATE_FMT)
+                return
+            ms_part = int((frac + '000')[:3])
         try:
             t = time.strptime(date_main, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            self._set_locked(self.ts_textEdit, ERR_DATE_FMT)
+            return
+        try:
             seconds = int(time.mktime(t))
-        except (ValueError, OverflowError):
-            self._ts_signal_lock = True
-            try:
-                self.ts_textEdit.setPlainText("illegal character")
-            finally:
-                self._ts_signal_lock = False
+        except (OverflowError, ValueError):
+            self._set_locked(self.ts_textEdit, ERR_TS_RANGE)
             return
         if self._ts_unit == 'ms':
             ts_val = seconds * 1000 + ms_part
         else:
             ts_val = seconds
-        self._ts_signal_lock = True
-        try:
-            self.ts_textEdit.setPlainText(str(ts_val))
-        finally:
-            self._ts_signal_lock = False
+        self._set_locked(self.ts_textEdit, str(ts_val))
         self._record_history('date_to_ts', [date_str, self._ts_unit], str(ts_val))
 
     def _mask(self):
@@ -430,23 +436,37 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
     def calc_func(self, left_te, right_te, eq_te, operator, op_id=None) -> None:
         left_str = left_te.toPlainText().strip()
         right_str = right_te.toPlainText().strip()
-        data = left_str.strip() + right_str.strip()
-        if re.match('\A[0-9a-fxA-FX]+\Z', data) is None:
-            eq_te.setText("illegal character")
+        if len(left_str) == 0 or len(right_str) == 0:
+            return
+        if re.match(r'\A[0-9a-fxA-FX]+\Z', left_str + right_str) is None:
+            eq_te.setText(ERR_HEX_CHAR)
             return
         try:
-            if len(left_str) > 0 and len(right_str) > 0:
-                mask = self._mask()
-                leftint = int(left_str, 16) & mask
-                rightint = int(right_str, 16) & mask
-                armcode = 'int(%d%s%d)' % (leftint, operator, rightint)
-                outend = eval(armcode)
-                result = "0x%x" % (outend & mask)
-                eq_te.setText(result)
-                if op_id is not None:
-                    self._record_history(op_id, [left_str, right_str], result)
-        except Exception as e:
-            eq_te.setText("illegal character")
+            leftint = int(left_str, 16)
+            rightint = int(right_str, 16)
+        except ValueError:
+            eq_te.setText(ERR_HEX_CHAR)
+            return
+        mask = self._mask()
+        leftint &= mask
+        rightint &= mask
+        if operator in ('/', '%') and rightint == 0:
+            eq_te.setText(ERR_DIV_ZERO)
+            return
+        if operator in ('<<', '>>'):
+            if rightint >= self.bit_width:
+                eq_te.setText(err_shift_over(self.bit_width))
+                return
+        try:
+            armcode = 'int(%d%s%d)' % (leftint, operator, rightint)
+            outend = eval(armcode)
+        except Exception:
+            eq_te.setText(ERR_HEX_CHAR)
+            return
+        result = "0x%x" % (outend & mask)
+        eq_te.setText(result)
+        if op_id is not None:
+            self._record_history(op_id, [left_str, right_str], result)
 
     def calc_add_textEdit_changed(self):
         left_str = self.add_left_textEdit.toPlainText()
@@ -495,49 +515,37 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
             self.calc_func(self.shr_left_textEdit, self.shr_right_textEdit, self.shr_eq_textEdit, '>>', 'shr')
 
     def calc_lsl_textEdit_changed(self):
-        left_str = self.lsl_left_textEdit.toPlainText().strip()
-        right_str = self.lsl_right_textEdit.toPlainText().strip()
-        if len(left_str) > 0 and len(right_str) > 0:
-            data = left_str + right_str
-            if re.match('\A[0-9a-fxA-FX]+\Z', data) is None:
-                self.lsl_eq_textEdit.setText("illegal character")
-                return
-            try:
-                width = self.bit_width
-                mask = self._mask()
-                leftint = int(left_str, 16) & mask
-                n = int(right_str, 16) % width
-                if n == 0:
-                    outend = leftint
-                else:
-                    outend = ((leftint << n) | (leftint >> (width - n))) & mask
-                result = "0x%x" % outend
-                self.lsl_eq_textEdit.setText(result)
-                self._record_history('lsl', [left_str, right_str], result)
-            except Exception as e:
-                self.lsl_eq_textEdit.setText("illegal character")
+        self._do_rotate(self.lsl_left_textEdit, self.lsl_right_textEdit, self.lsl_eq_textEdit, 'lsl')
     def calc_ror_textEdit_changed(self):
-        left_str = self.ror_left_textEdit.toPlainText().strip()
-        right_str = self.ror_right_textEdit.toPlainText().strip()
-        if len(left_str) > 0 and len(right_str) > 0:
-            data = left_str + right_str
-            if re.match('\A[0-9a-fxA-FX]+\Z', data) is None:
-                self.ror_eq_textEdit.setText("illegal character")
-                return
-            try:
-                width = self.bit_width
-                mask = self._mask()
-                leftint = int(left_str, 16) & mask
-                n = int(right_str, 16) % width
-                if n == 0:
-                    outend = leftint
-                else:
-                    outend = ((leftint >> n) | (leftint << (width - n))) & mask
-                result = "0x%x" % outend
-                self.ror_eq_textEdit.setText(result)
-                self._record_history('ror', [left_str, right_str], result)
-            except Exception as e:
-                self.ror_eq_textEdit.setText("illegal character")
+        self._do_rotate(self.ror_left_textEdit, self.ror_right_textEdit, self.ror_eq_textEdit, 'ror')
+
+    def _do_rotate(self, left_te, right_te, eq_te, op_id):
+        left_str = left_te.toPlainText().strip()
+        right_str = right_te.toPlainText().strip()
+        if len(left_str) == 0 or len(right_str) == 0:
+            return
+        if re.match(r'\A[0-9a-fxA-FX]+\Z', left_str + right_str) is None:
+            eq_te.setText(ERR_HEX_CHAR)
+            return
+        try:
+            leftint = int(left_str, 16)
+            n_raw = int(right_str, 16)
+        except ValueError:
+            eq_te.setText(ERR_HEX_CHAR)
+            return
+        width = self.bit_width
+        mask = self._mask()
+        leftint &= mask
+        n = n_raw % width
+        if n == 0:
+            outend = leftint
+        elif op_id == 'lsl':
+            outend = ((leftint << n) | (leftint >> (width - n))) & mask
+        else:
+            outend = ((leftint >> n) | (leftint << (width - n))) & mask
+        result = "0x%x" % outend
+        eq_te.setText(result)
+        self._record_history(op_id, [left_str, right_str], result)
     def calc_mod_textEdit_changed(self):
         left_str = self.mod_left_textEdit.toPlainText()
         right_str = self.mod_right_textEdit.toPlainText()
@@ -545,191 +553,284 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
             self.calc_func(self.mod_left_textEdit, self.mod_right_textEdit, self.mod_eq_textEdit, '%', 'mod')
 
     def ord_ord_textEdit_changed(self):
-        ##判断是否在焦点上来确实是否在输入状态
-        if self.ord_ord_textEdit.hasFocus():
-            ord_ord_str = self.ord_ord_textEdit.toPlainText()
-            try:
-                if len(ord_ord_str) > 1 or (len(ord_ord_str) == 1 and ord_ord_str[0:1] != '-'):
-                    s_hex_neg = struct.pack('l', int(ord_ord_str))
-                    hex_result = hex(bytes_to_int(s_hex_neg))
-                    uord_result = "%i" % int.from_bytes(s_hex_neg, byteorder='little', signed=False)
-                    self.hex_ord_textEdit.setText(hex_result)
-                    self.uord_ord_textEdit.setText(uord_result)
-                    self._record_history('ord_from_signed', [ord_ord_str.strip()], hex_result)
-            except Exception as e:
-                self.uord_ord_textEdit.setText("illegal character")
-                self.hex_ord_textEdit.setText("illegal character")
+        if not self.ord_ord_textEdit.hasFocus():
+            return
+        s = self.ord_ord_textEdit.toPlainText().strip()
+        if not s or s == '-':
+            return
+        if re.match(r'\A-?\d+\Z', s) is None:
+            self.uord_ord_textEdit.setText(ERR_NOT_NUMBER)
+            self.hex_ord_textEdit.setText(ERR_NOT_NUMBER)
+            return
+        try:
+            intval = int(s)
+            s_hex_neg = struct.pack('q', intval)
+        except (ValueError, struct.error, OverflowError):
+            self.uord_ord_textEdit.setText(err_overflow(64))
+            self.hex_ord_textEdit.setText(err_overflow(64))
+            return
+        hex_result = hex(bytes_to_int(s_hex_neg))
+        uord_result = "%i" % int.from_bytes(s_hex_neg, byteorder='little', signed=False)
+        self.hex_ord_textEdit.setText(hex_result)
+        self.uord_ord_textEdit.setText(uord_result)
+        self._record_history('ord_from_signed', [s], hex_result)
     def uord_ord_textEdit_changed(self):
-        ##判断是否在焦点上来确实是否在输入状态
-        if self.uord_ord_textEdit.hasFocus():
-            uord_ord_str = self.uord_ord_textEdit.toPlainText()
-            try:
-                if len(uord_ord_str) > 1 or (len(uord_ord_str) == 1 and uord_ord_str[0:1] != '-'):
-                    intval = int(uord_ord_str)
-                    s_hex = struct.pack('L', intval)
-                    hex_result = hex(intval)
-                    ord_result = "%i" % int.from_bytes(s_hex, byteorder='little', signed=True)
-                    self.hex_ord_textEdit.setText(hex_result)
-                    self.ord_ord_textEdit.setText(ord_result)
-                    self._record_history('ord_from_unsigned', [uord_ord_str.strip()], hex_result)
-            except Exception as e:
-                self.ord_ord_textEdit.setText("illegal character")
-                self.hex_ord_textEdit.setText("illegal character")
+        if not self.uord_ord_textEdit.hasFocus():
+            return
+        s = self.uord_ord_textEdit.toPlainText().strip()
+        if not s:
+            return
+        if re.match(r'\A\d+\Z', s) is None:
+            self.ord_ord_textEdit.setText(ERR_NOT_NUMBER)
+            self.hex_ord_textEdit.setText(ERR_NOT_NUMBER)
+            return
+        try:
+            intval = int(s)
+            s_hex = struct.pack('Q', intval)
+        except (ValueError, struct.error, OverflowError):
+            self.ord_ord_textEdit.setText(err_overflow(64))
+            self.hex_ord_textEdit.setText(err_overflow(64))
+            return
+        hex_result = hex(intval)
+        ord_result = "%i" % int.from_bytes(s_hex, byteorder='little', signed=True)
+        self.hex_ord_textEdit.setText(hex_result)
+        self.ord_ord_textEdit.setText(ord_result)
+        self._record_history('ord_from_unsigned', [s], hex_result)
     def hex_ord_textEdit_changed(self):
-        ##判断是否在焦点上来确实是否在输入状态
-        if self.hex_ord_textEdit.hasFocus():
-            hex_ord_str = self.hex_ord_textEdit.toPlainText()
-            try:
-                if len(hex_ord_str) > 1 or (len(hex_ord_str) == 1 and hex_ord_str[0:1] != '-'):
-                    intval = int(hex_ord_str, 16)
-                    s_hex = struct.pack('L', intval)
-                    uord_result = "%i" % int.from_bytes(s_hex, byteorder='little', signed=False)
-                    ord_result = "%i" % int.from_bytes(s_hex, byteorder='little', signed=True)
-                    self.uord_ord_textEdit.setText(uord_result)
-                    self.ord_ord_textEdit.setText(ord_result)
-                    self._record_history('ord_from_hex', [hex_ord_str.strip()], ord_result)
-            except Exception as e:
-                self.ord_ord_textEdit.setText("illegal character")
-                self.uord_ord_textEdit.setText("illegal character")
+        if not self.hex_ord_textEdit.hasFocus():
+            return
+        s = self.hex_ord_textEdit.toPlainText().strip()
+        if not s:
+            return
+        s_clean = s[2:] if s.lower().startswith('0x') else s
+        if not s_clean or re.match(r'\A[0-9a-fA-F]+\Z', s_clean) is None:
+            self.ord_ord_textEdit.setText(ERR_HEX_CHAR)
+            self.uord_ord_textEdit.setText(ERR_HEX_CHAR)
+            return
+        try:
+            intval = int(s, 16)
+            if intval >= (1 << 64):
+                self.ord_ord_textEdit.setText(err_overflow(64))
+                self.uord_ord_textEdit.setText(err_overflow(64))
+                return
+            s_hex = struct.pack('Q', intval)
+        except (ValueError, struct.error, OverflowError):
+            self.ord_ord_textEdit.setText(err_overflow(64))
+            self.uord_ord_textEdit.setText(err_overflow(64))
+            return
+        uord_result = "%i" % int.from_bytes(s_hex, byteorder='little', signed=False)
+        ord_result = "%i" % int.from_bytes(s_hex, byteorder='little', signed=True)
+        self.uord_ord_textEdit.setText(uord_result)
+        self.ord_ord_textEdit.setText(ord_result)
+        self._record_history('ord_from_hex', [s], ord_result)
     def leb_leb_textEdit_changed(self):
-        ##判断是否在焦点上来确实是否在输入状态
-        if self.leb_leb_textEdit.hasFocus():
-            raw = self.leb_leb_textEdit.toPlainText()
-            hex_leb_str = raw.strip().replace(' ', '').replace('\n', '').replace('\r', '').replace('\t', '').replace('\x00', '')
-            try:
-                leb_bytes = hexStringTobytes(hex_leb_str)
-                print(leb_bytes)
-                intval = leb128_to_int(leb_bytes)
-                print(hex(intval))
-                s_hex_neg = struct.pack('l', intval)
-                uintval = int.from_bytes(s_hex_neg, byteorder='little', signed=False)
-                uleb128_bytes = uint_to_uleb128(uintval)
-                hex_result = hex(uintval)
-                self.uleb_leb_textEdit.setText(bytesToHexString(uleb128_bytes))
-                self.hex_leb_textEdit.setText(hex_result)
-                self._record_history('leb_from_leb', [hex_leb_str], hex_result)
-            except Exception as e:
-                self.uleb_leb_textEdit.setText("illegal character")
-                self.hex_leb_textEdit.setText("illegal character")
+        if not self.leb_leb_textEdit.hasFocus():
+            return
+        raw = self.leb_leb_textEdit.toPlainText().strip()
+        hex_leb_str = re.sub(r'\s|\x00', '', raw)
+        if not hex_leb_str:
+            return
+        leb_bytes, perr = self._parse_leb_hex(hex_leb_str)
+        if perr:
+            self.uleb_leb_textEdit.setText(perr)
+            self.hex_leb_textEdit.setText(perr)
+            return
+        try:
+            intval = leb128_to_int(leb_bytes)
+            s_hex_neg = struct.pack('q', intval)
+            uintval = int.from_bytes(s_hex_neg, byteorder='little', signed=False)
+            uleb128_bytes = uint_to_uleb128(uintval)
+            hex_result = hex(uintval)
+        except Exception:
+            self.uleb_leb_textEdit.setText(ERR_LEB_HEX)
+            self.hex_leb_textEdit.setText(ERR_LEB_HEX)
+            return
+        self.uleb_leb_textEdit.setText(bytesToHexString(uleb128_bytes))
+        self.hex_leb_textEdit.setText(hex_result)
+        self._record_history('leb_from_leb', [hex_leb_str], hex_result)
     def uleb_leb_textEdit_changed(self):
-        ##判断是否在焦点上来确实是否在输入状态
-        if self.uleb_leb_textEdit.hasFocus():
-            raw = self.uleb_leb_textEdit.toPlainText()
-            hex_uleb_str = raw.strip().replace(' ', '').replace('\n', '').replace('\r', '').replace('\t', '').replace('\x00', '')
-            try:
-                uleb_bytes = hexStringTobytes(hex_uleb_str)
-                print(uleb_bytes)
-                uintval = uleb128_to_uint(uleb_bytes)
-                s_hex_neg = struct.pack('L', uintval)
-                intval = int.from_bytes(s_hex_neg, byteorder='little', signed=True)
-                leb128_bytes = int_to_leb128(intval)
-                hex_result = hex(intval)
-                self.leb_leb_textEdit.setText(bytesToHexString(leb128_bytes))
-                self.hex_leb_textEdit.setText(hex_result)
-                self._record_history('leb_from_uleb', [hex_uleb_str], hex_result)
-            except Exception as e:
-                self.leb_leb_textEdit.setText("illegal character")
-                self.hex_leb_textEdit.setText("illegal character")
+        if not self.uleb_leb_textEdit.hasFocus():
+            return
+        raw = self.uleb_leb_textEdit.toPlainText().strip()
+        hex_uleb_str = re.sub(r'\s|\x00', '', raw)
+        if not hex_uleb_str:
+            return
+        uleb_bytes, perr = self._parse_leb_hex(hex_uleb_str)
+        if perr:
+            self.leb_leb_textEdit.setText(perr)
+            self.hex_leb_textEdit.setText(perr)
+            return
+        try:
+            uintval = uleb128_to_uint(uleb_bytes)
+            if uintval == -1:
+                raise ValueError
+            s_hex_neg = struct.pack('Q', uintval)
+            intval = int.from_bytes(s_hex_neg, byteorder='little', signed=True)
+            leb128_bytes = int_to_leb128(intval)
+            hex_result = hex(intval)
+        except Exception:
+            self.leb_leb_textEdit.setText(ERR_LEB_HEX)
+            self.hex_leb_textEdit.setText(ERR_LEB_HEX)
+            return
+        self.leb_leb_textEdit.setText(bytesToHexString(leb128_bytes))
+        self.hex_leb_textEdit.setText(hex_result)
+        self._record_history('leb_from_uleb', [hex_uleb_str], hex_result)
     def hex_leb_textEdit_changed(self):
-        ##判断是否在焦点上来确实是否在输入状态
-        if self.hex_leb_textEdit.hasFocus():
-            raw = self.hex_leb_textEdit.toPlainText()
-            hex_hex_str = raw.strip().replace(' ', '').replace('\n', '').replace('\r', '').replace('\t', '').replace('\x00', '')
-            try:
-                uintval = int(hex_hex_str,16)
-                print(hex(uintval))
-                uleb128_bytes = uint_to_uleb128(uintval)
-                s_hex_neg = struct.pack('L', uintval)
-                intval = int.from_bytes(s_hex_neg, byteorder='little', signed=True)
-                leb128_bytes = int_to_leb128(intval)
-                leb_result = bytesToHexString(leb128_bytes)
-                self.leb_leb_textEdit.setText(leb_result)
-                self.uleb_leb_textEdit.setText(bytesToHexString(uleb128_bytes))
-                self._record_history('leb_from_hex', [hex_hex_str], leb_result)
-            except Exception as e:
-                self.leb_leb_textEdit.setText("illegal character")
-                self.uleb_leb_textEdit.setText("illegal character")
+        if not self.hex_leb_textEdit.hasFocus():
+            return
+        raw = self.hex_leb_textEdit.toPlainText().strip()
+        hex_hex_str = re.sub(r'\s|\x00', '', raw)
+        if not hex_hex_str:
+            return
+        s_clean = hex_hex_str[2:] if hex_hex_str.lower().startswith('0x') else hex_hex_str
+        if not s_clean or re.match(r'\A[0-9a-fA-F]+\Z', s_clean) is None:
+            self.leb_leb_textEdit.setText(ERR_HEX_CHAR)
+            self.uleb_leb_textEdit.setText(ERR_HEX_CHAR)
+            return
+        try:
+            uintval = int(hex_hex_str, 16)
+            if uintval >= (1 << 64):
+                self.leb_leb_textEdit.setText(err_overflow(64))
+                self.uleb_leb_textEdit.setText(err_overflow(64))
+                return
+            uleb128_bytes = uint_to_uleb128(uintval)
+            s_hex_neg = struct.pack('Q', uintval)
+            intval = int.from_bytes(s_hex_neg, byteorder='little', signed=True)
+            leb128_bytes = int_to_leb128(intval)
+            leb_result = bytesToHexString(leb128_bytes)
+        except Exception:
+            self.leb_leb_textEdit.setText(ERR_HEX_CHAR)
+            self.uleb_leb_textEdit.setText(ERR_HEX_CHAR)
+            return
+        self.leb_leb_textEdit.setText(leb_result)
+        self.uleb_leb_textEdit.setText(bytesToHexString(uleb128_bytes))
+        self._record_history('leb_from_hex', [hex_hex_str], leb_result)
+
+    @staticmethod
+    def _parse_leb_hex(hex_str):
+        if re.match(r'\A[0-9a-fA-F]+\Z', hex_str) is None:
+            return None, ERR_LEB_HEX
+        if len(hex_str) % 2 != 0:
+            return None, ERR_LEB_HEX
+        try:
+            data = bytes.fromhex(hex_str)
+        except ValueError:
+            return None, ERR_LEB_HEX
+        if len(data) == 0:
+            return None, ERR_LEB_HEX
+        if len(data) > 5:
+            return None, ERR_LEB_OVER
+        if (data[-1] & 0x80) != 0:
+            return None, err("LEB 未终止")
+        return data, None
     def float_float_textEdit_changed(self):
-        ##判断是否在焦点上来确实是否在输入状态
-        if self.float_float_textEdit.hasFocus():
-            float_str = self.float_float_textEdit.toPlainText()
-            try:
-                floatval = float(float_str)
-                print(floatval)
-                s_hex_float = struct.pack('f', floatval)
-                print(s_hex_float)
-                uintval = int.from_bytes(s_hex_float, byteorder='little', signed=False)
-                print(hex(uintval))
-                s_hex_float = b'\x00\x00\x00\x00' + s_hex_float
-                doubleval = struct.unpack('d', s_hex_float)
-                hex_result = hex(uintval)
-                self.double_float_textEdit.setText("%.2f" % doubleval)
-                self.hex_float_textEdit.setText(hex_result)
-                self._record_history('float_from_float', [float_str.strip()], hex_result)
-            except Exception as e:
-                self.double_float_textEdit.setText("illegal character")
-                self.hex_float_textEdit.setText("illegal character")
+        if not self.float_float_textEdit.hasFocus():
+            return
+        s = self.float_float_textEdit.toPlainText().strip()
+        if not s or s == '-':
+            return
+        try:
+            floatval = float(s)
+        except ValueError:
+            self.double_float_textEdit.setText(ERR_FLOAT_BAD)
+            self.hex_float_textEdit.setText(ERR_FLOAT_BAD)
+            return
+        FLOAT32_MAX = 3.4028234663852886e+38
+        if not (floatval != floatval) and floatval not in (float('inf'), float('-inf')):
+            if abs(floatval) > FLOAT32_MAX:
+                self.double_float_textEdit.setText(ERR_FLOAT_OVER)
+                self.hex_float_textEdit.setText(ERR_FLOAT_OVER)
+                return
+        try:
+            s_hex_float = struct.pack('f', floatval)
+        except (OverflowError, struct.error):
+            self.double_float_textEdit.setText(ERR_FLOAT_OVER)
+            self.hex_float_textEdit.setText(ERR_FLOAT_OVER)
+            return
+        uintval = int.from_bytes(s_hex_float, byteorder='little', signed=False)
+        s_hex_padded = b'\x00\x00\x00\x00' + s_hex_float
+        doubleval = struct.unpack('d', s_hex_padded)
+        hex_result = hex(uintval)
+        self.double_float_textEdit.setText("%.2f" % doubleval)
+        self.hex_float_textEdit.setText(hex_result)
+        self._record_history('float_from_float', [s], hex_result)
     def double_float_textEdit_changed(self):
-        ##判断是否在焦点上来确实是否在输入状态
-        if self.double_float_textEdit.hasFocus():
-            double_str = self.double_float_textEdit.toPlainText()
-            try:
-                doubleval = float(double_str)
-                print(doubleval)
-                s_hex_double = struct.pack('d', doubleval)
-                #print(s_hex_float)
-                uintval = int.from_bytes(s_hex_double, byteorder='little', signed=False)
-                print(hex(uintval))
-                s_hex_float = s_hex_double[4:8]
-                floatval = struct.unpack('f', s_hex_float)
-                hex_result = hex(uintval)
-                self.float_float_textEdit.setText("%.2f" % floatval)
-                self.hex_float_textEdit.setText(hex_result)
-                self._record_history('float_from_double', [double_str.strip()], hex_result)
-            except Exception as e:
-                self.float_float_textEdit.setText("illegal character")
-                self.hex_float_textEdit.setText("illegal character")
+        if not self.double_float_textEdit.hasFocus():
+            return
+        s = self.double_float_textEdit.toPlainText().strip()
+        if not s or s == '-':
+            return
+        try:
+            doubleval = float(s)
+        except ValueError:
+            self.float_float_textEdit.setText(ERR_FLOAT_BAD)
+            self.hex_float_textEdit.setText(ERR_FLOAT_BAD)
+            return
+        try:
+            s_hex_double = struct.pack('d', doubleval)
+        except (OverflowError, struct.error):
+            self.float_float_textEdit.setText(ERR_FLOAT_OVER)
+            self.hex_float_textEdit.setText(ERR_FLOAT_OVER)
+            return
+        uintval = int.from_bytes(s_hex_double, byteorder='little', signed=False)
+        s_hex_float = s_hex_double[4:8]
+        floatval = struct.unpack('f', s_hex_float)
+        hex_result = hex(uintval)
+        self.float_float_textEdit.setText("%.2f" % floatval)
+        self.hex_float_textEdit.setText(hex_result)
+        self._record_history('float_from_double', [s], hex_result)
     def hex_float_textEdit_changed(self):
-        ##判断是否在焦点上来确实是否在输入状态
-        if self.hex_float_textEdit.hasFocus():
-            hex_str = self.hex_float_textEdit.toPlainText()
-            try:
-                longval = int(hex_str, 16)
-                s_hex_long = struct.pack('L', longval)
-                s_hex_float = s_hex_long[0:4]
-                floatval = struct.unpack('f', s_hex_float)
-                doubleval = struct.unpack('d', s_hex_long)
-                float_result = "%.2f" % floatval
-                self.float_float_textEdit.setText(float_result)
-                self.double_float_textEdit.setText("%.2f" % doubleval)
-                self._record_history('float_from_hex', [hex_str.strip()], float_result)
-            except Exception as e:
-                self.float_float_textEdit.setText("illegal character")
-                self.double_float_textEdit.setText("illegal character")
+        if not self.hex_float_textEdit.hasFocus():
+            return
+        s = self.hex_float_textEdit.toPlainText().strip()
+        if not s:
+            return
+        s_clean = s[2:] if s.lower().startswith('0x') else s
+        if not s_clean or re.match(r'\A[0-9a-fA-F]+\Z', s_clean) is None:
+            self.float_float_textEdit.setText(ERR_HEX_CHAR)
+            self.double_float_textEdit.setText(ERR_HEX_CHAR)
+            return
+        try:
+            longval = int(s, 16)
+            if longval >= (1 << 64):
+                self.float_float_textEdit.setText(err_overflow(64))
+                self.double_float_textEdit.setText(err_overflow(64))
+                return
+            s_hex_long = struct.pack('Q', longval)
+        except (ValueError, struct.error, OverflowError):
+            self.float_float_textEdit.setText(err_overflow(64))
+            self.double_float_textEdit.setText(err_overflow(64))
+            return
+        floatval = struct.unpack('f', s_hex_long[0:4])
+        doubleval = struct.unpack('d', s_hex_long)
+        float_result = "%.2f" % floatval
+        self.float_float_textEdit.setText(float_result)
+        self.double_float_textEdit.setText("%.2f" % doubleval)
+        self._record_history('float_from_hex', [s], float_result)
     def left_not_textEdit_changed(self):
-        ##判断是否在焦点上来确实是否在输入状态
         if self.left_not_textEdit.hasFocus():
-            hex_str = self.left_not_textEdit.toPlainText()
-            try:
-                mask = self._mask()
-                longval = int(hex_str, 16) & mask
-                result = "0x%x" % (~longval & mask)
-                self.right_not_textEdit.setText(result)
-                self._record_history('not_from_left', [hex_str.strip()], result)
-            except Exception as e:
-                self.right_not_textEdit.setText("illegal character")
+            self._do_not(self.left_not_textEdit, self.right_not_textEdit, 'not_from_left')
     def right_not_textEdit_changed(self):
-        ##判断是否在焦点上来确实是否在输入状态
         if self.right_not_textEdit.hasFocus():
-            hex_str = self.right_not_textEdit.toPlainText()
-            try:
-                mask = self._mask()
-                longval = int(hex_str, 16) & mask
-                result = "0x%x" % (~longval & mask)
-                self.left_not_textEdit.setText(result)
-                self._record_history('not_from_right', [hex_str.strip()], result)
-            except Exception as e:
-                self.left_not_textEdit.setText("illegal character")
+            self._do_not(self.right_not_textEdit, self.left_not_textEdit, 'not_from_right')
+
+    def _do_not(self, src_te, dst_te, op_id):
+        s = src_te.toPlainText().strip()
+        if not s:
+            return
+        s_clean = s[2:] if s.lower().startswith('0x') else s
+        if not s_clean or re.match(r'\A[0-9a-fA-F]+\Z', s_clean) is None:
+            dst_te.setText(ERR_HEX_CHAR)
+            return
+        try:
+            mask = self._mask()
+            longval = int(s, 16) & mask
+        except ValueError:
+            dst_te.setText(ERR_HEX_CHAR)
+            return
+        result = "0x%x" % (~longval & mask)
+        dst_te.setText(result)
+        self._record_history(op_id, [s], result)
 
     def _toggle_history_dialog(self):
         if self.history_dialog.isVisible():
@@ -744,7 +845,7 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
             return
         if op_id not in OP_TABLE:
             return
-        if not result or 'illegal' in str(result):
+        if not result or str(result).startswith(ERR_PREFIX) or 'illegal' in str(result):
             return
         cleaned_inputs = [str(x).strip() for x in inputs]
         if any(len(x) == 0 for x in cleaned_inputs):
