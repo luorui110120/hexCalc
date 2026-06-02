@@ -156,6 +156,10 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
         super(MyMainForm, self).__init__(parent)
         self.setupUi(self)
 
+        self.bit_width = 64
+        self._suppress_history = False
+        self.init_bitwidth_ui()
+
         self.add_left_textEdit.textChanged.connect(self.calc_add_textEdit_changed)
         self.add_right_textEdit.textChanged.connect(self.calc_add_textEdit_changed)
         self.sub_left_textEdit.textChanged.connect(self.calc_sub_textEdit_changed)
@@ -195,6 +199,89 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
         if 0 == len(g_talbeadd_list):
             self.global_init()
         self.setUsesScrollButtons(True)
+
+    def init_bitwidth_ui(self):
+        label_font = QtGui.QFont()
+        label_font.setPointSize(18)
+        radio_font = QtGui.QFont()
+        radio_font.setPointSize(14)
+
+        self.bitwidth_label = QtWidgets.QLabel(self.tab)
+        self.bitwidth_label.setGeometry(QtCore.QRect(10, 740, 71, 31))
+        self.bitwidth_label.setFont(label_font)
+        self.bitwidth_label.setText("bits")
+
+        self.bitwidth_group = QtWidgets.QButtonGroup(self.tab)
+        self._bitwidth_radios = {}
+        x = 90
+        for w in (8, 16, 32, 64):
+            rb = QtWidgets.QRadioButton(str(w), self.tab)
+            rb.setGeometry(QtCore.QRect(x, 745, 70, 25))
+            rb.setFont(radio_font)
+            if w == self.bit_width:
+                rb.setChecked(True)
+            self.bitwidth_group.addButton(rb, w)
+            self._bitwidth_radios[w] = rb
+            x += 75
+        self.bitwidth_group.idClicked.connect(self._on_bitwidth_changed)
+
+        self.line_note.setGeometry(QtCore.QRect(40, 775, 631, 21))
+
+    def _mask(self):
+        return (1 << self.bit_width) - 1
+
+    def _on_bitwidth_changed(self, new_width):
+        if new_width == self.bit_width:
+            return
+        self.bit_width = new_width
+        self._recompute_all()
+
+    def _recompute_all(self):
+        self._suppress_history = True
+        try:
+            for op_id, info in OP_TABLE.items():
+                first_input_attr = info['inputs'][0]
+                widget = getattr(self, first_input_attr, None)
+                if widget is None:
+                    continue
+                if not widget.toPlainText().strip():
+                    continue
+                slot = self._slot_for_op(op_id)
+                if slot is None:
+                    continue
+                if op_id.startswith(('ord_from', 'leb_from', 'float_from', 'not_from')):
+                    widget.setFocus()
+                slot()
+        finally:
+            self._suppress_history = False
+
+    def _slot_for_op(self, op_id):
+        mapping = {
+            'add': self.calc_add_textEdit_changed,
+            'sub': self.calc_sub_textEdit_changed,
+            'mul': self.calc_mul_textEdit_changed,
+            'div': self.calc_div_textEdit_changed,
+            'mod': self.calc_mod_textEdit_changed,
+            'xor': self.calc_xor_textEdit_changed,
+            'and': self.calc_and_textEdit_changed,
+            'orr': self.calc_orr_textEdit_changed,
+            'shl': self.calc_shl_textEdit_changed,
+            'shr': self.calc_shr_textEdit_changed,
+            'lsl': self.calc_lsl_textEdit_changed,
+            'ror': self.calc_ror_textEdit_changed,
+            'ord_from_signed': self.ord_ord_textEdit_changed,
+            'ord_from_unsigned': self.uord_ord_textEdit_changed,
+            'ord_from_hex': self.hex_ord_textEdit_changed,
+            'leb_from_leb': self.leb_leb_textEdit_changed,
+            'leb_from_uleb': self.uleb_leb_textEdit_changed,
+            'leb_from_hex': self.hex_leb_textEdit_changed,
+            'float_from_float': self.float_float_textEdit_changed,
+            'float_from_double': self.double_float_textEdit_changed,
+            'float_from_hex': self.hex_float_textEdit_changed,
+            'not_from_left': self.left_not_textEdit_changed,
+            'not_from_right': self.right_not_textEdit_changed,
+        }
+        return mapping.get(op_id)
 
     # tab(标签)关闭函数；
     def close_tab(self, index) -> None:
@@ -238,11 +325,12 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
             return
         try:
             if len(left_str) > 0 and len(right_str) > 0:
-                leftint = int(left_str, 16)
-                rightint = int(right_str, 16)
+                mask = self._mask()
+                leftint = int(left_str, 16) & mask
+                rightint = int(right_str, 16) & mask
                 armcode = 'int(%d%s%d)' % (leftint, operator, rightint)
                 outend = eval(armcode)
-                result = "0x%x" % (outend & ((1 << 64) - 1))
+                result = "0x%x" % (outend & mask)
                 eq_te.setText(result)
                 if op_id is not None:
                     self._record_history(op_id, [left_str, right_str], result)
@@ -304,17 +392,17 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
                 self.lsl_eq_textEdit.setText("illegal character")
                 return
             try:
-                if len(left_str) > 0 and len(right_str) > 0:
-                    leftint = int(left_str, 16)
-                    rightint = int(right_str, 16)
-                    outend = 0
-                    if leftint < 0x100000000:
-                        outend = ((leftint >> (32 - rightint)) | (leftint << rightint)) & 0xffffffff
-                    else:
-                        outend = (leftint >> (64 - rightint)) | (leftint << rightint)
-                    result = "0x%x" % (outend & ((1 << 64) - 1))
-                    self.lsl_eq_textEdit.setText(result)
-                    self._record_history('lsl', [left_str, right_str], result)
+                width = self.bit_width
+                mask = self._mask()
+                leftint = int(left_str, 16) & mask
+                n = int(right_str, 16) % width
+                if n == 0:
+                    outend = leftint
+                else:
+                    outend = ((leftint << n) | (leftint >> (width - n))) & mask
+                result = "0x%x" % outend
+                self.lsl_eq_textEdit.setText(result)
+                self._record_history('lsl', [left_str, right_str], result)
             except Exception as e:
                 self.lsl_eq_textEdit.setText("illegal character")
     def calc_ror_textEdit_changed(self):
@@ -326,17 +414,17 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
                 self.ror_eq_textEdit.setText("illegal character")
                 return
             try:
-                if len(left_str) > 0 and len(right_str) > 0:
-                    leftint = int(left_str, 16)
-                    rightint = int(right_str, 16)
-                    outend = 0
-                    if leftint < 0x100000000:
-                        outend = ((leftint << (32 - rightint)) | (leftint >> rightint)) & 0xffffffff
-                    else:
-                        outend = (leftint << (64 - rightint)) | (leftint >> rightint)
-                    result = "0x%x" % (outend & ((1 << 64) - 1))
-                    self.ror_eq_textEdit.setText(result)
-                    self._record_history('ror', [left_str, right_str], result)
+                width = self.bit_width
+                mask = self._mask()
+                leftint = int(left_str, 16) & mask
+                n = int(right_str, 16) % width
+                if n == 0:
+                    outend = leftint
+                else:
+                    outend = ((leftint >> n) | (leftint << (width - n))) & mask
+                result = "0x%x" % outend
+                self.ror_eq_textEdit.setText(result)
+                self._record_history('ror', [left_str, right_str], result)
             except Exception as e:
                 self.ror_eq_textEdit.setText("illegal character")
     def calc_mod_textEdit_changed(self):
@@ -512,8 +600,9 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
         if self.left_not_textEdit.hasFocus():
             hex_str = self.left_not_textEdit.toPlainText()
             try:
-                longval = int(hex_str, 16)
-                result = "0x%x" % (~longval & ((1 << 64) - 1))
+                mask = self._mask()
+                longval = int(hex_str, 16) & mask
+                result = "0x%x" % (~longval & mask)
                 self.right_not_textEdit.setText(result)
                 self._record_history('not_from_left', [hex_str.strip()], result)
             except Exception as e:
@@ -523,8 +612,9 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
         if self.right_not_textEdit.hasFocus():
             hex_str = self.right_not_textEdit.toPlainText()
             try:
-                longval = int(hex_str, 16)
-                result = "0x%x" % (~longval & ((1 << 64) - 1))
+                mask = self._mask()
+                longval = int(hex_str, 16) & mask
+                result = "0x%x" % (~longval & mask)
                 self.left_not_textEdit.setText(result)
                 self._record_history('not_from_right', [hex_str.strip()], result)
             except Exception as e:
@@ -539,6 +629,8 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
             self.history_dialog.raise_()
 
     def _record_history(self, op_id, inputs, result, outputs=None):
+        if self._suppress_history:
+            return
         if op_id not in OP_TABLE:
             return
         if not result or 'illegal' in str(result):
