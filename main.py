@@ -4,7 +4,6 @@
 # Created on 10:19 2020/11/12
 import os
 import sys,re
-import ast
 import time
 sys.dont_write_bytecode = True
 import logging
@@ -24,10 +23,8 @@ import struct
 logging.basicConfig(format="%(filename)s %(lineno)s %(funcName)s %(asctime)s %(name)s:%(levelname)s:%(message)s", datefmt="%Y-%m-%d %H:%M:%S", level=logging.FATAL)
 g_talbeadd_list = []
 g_create_count = 1
-MASK64 = (1 << 64) - 1
 
 OP_TABLE = {
-    'expr': {'label': 'expr', 'inputs': ['expr_input_textEdit'], 'outputs': ['expr_eq_textEdit']},
     'add':  {'label': '+',    'inputs': ['add_left_textEdit', 'add_right_textEdit'], 'outputs': ['add_eq_textEdit']},
     'sub':  {'label': '-',    'inputs': ['sub_left_textEdit', 'sub_right_textEdit'], 'outputs': ['sub_eq_textEdit']},
     'mul':  {'label': '*',    'inputs': ['mul_left_textEdit', 'mul_right_textEdit'], 'outputs': ['mul_eq_textEdit']},
@@ -52,67 +49,6 @@ OP_TABLE = {
     'not_from_left':  {'label': '~left',  'inputs': ['left_not_textEdit'],  'outputs': ['right_not_textEdit']},
     'not_from_right': {'label': '~right', 'inputs': ['right_not_textEdit'], 'outputs': ['left_not_textEdit']},
 }
-
-_BIN_OPS = {
-    ast.Add: lambda a, b: a + b,
-    ast.Sub: lambda a, b: a - b,
-    ast.Mult: lambda a, b: a * b,
-    ast.FloorDiv: lambda a, b: _trunc_div(a, b),
-    ast.Div: lambda a, b: _trunc_div(a, b),
-    ast.Mod: lambda a, b: a % b,
-    ast.BitXor: lambda a, b: a ^ b,
-    ast.BitAnd: lambda a, b: a & b,
-    ast.BitOr: lambda a, b: a | b,
-    ast.LShift: lambda a, b: _lshift64(a, b),
-    ast.RShift: lambda a, b: _rshift(a, b),
-}
-_UNARY_OPS = {
-    ast.UAdd: lambda a: a,
-    ast.USub: lambda a: -a,
-    ast.Invert: lambda a: ~a,
-}
-
-
-def _trunc_div(a, b):
-    if b == 0:
-        raise ZeroDivisionError
-    sign = -1 if (a < 0) ^ (b < 0) else 1
-    return sign * (abs(a) // abs(b))
-
-
-def _lshift64(a, b):
-    if b < 0:
-        raise ValueError
-    if b >= 64:
-        return 0
-    return a << b
-
-
-def _rshift(a, b):
-    if b < 0:
-        raise ValueError
-    return a >> b
-
-
-def eval_int_expr(expr):
-    node = ast.parse(expr, mode='eval')
-    return _eval_int_expr_node(node.body)
-
-
-def _eval_int_expr_node(node):
-    if isinstance(node, ast.Constant) and isinstance(node.value, int):
-        return node.value
-    if isinstance(node, ast.BinOp):
-        op = _BIN_OPS.get(type(node.op))
-        if op is None:
-            raise ValueError
-        return op(_eval_int_expr_node(node.left), _eval_int_expr_node(node.right))
-    if isinstance(node, ast.UnaryOp):
-        op = _UNARY_OPS.get(type(node.op))
-        if op is None:
-            raise ValueError
-        return op(_eval_int_expr_node(node.operand))
-    raise ValueError
 
 class HistoryDialog(QDialog):
     def __init__(self, parent=None):
@@ -219,9 +155,7 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
         global g_talbeadd_list
         super(MyMainForm, self).__init__(parent)
         self.setupUi(self)
-        self.init_expr_calc()
 
-        self.expr_input_textEdit.textChanged.connect(self.expr_input_textEdit_changed)
         self.add_left_textEdit.textChanged.connect(self.calc_add_textEdit_changed)
         self.add_right_textEdit.textChanged.connect(self.calc_add_textEdit_changed)
         self.sub_left_textEdit.textChanged.connect(self.calc_sub_textEdit_changed)
@@ -261,35 +195,6 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
         if 0 == len(g_talbeadd_list):
             self.global_init()
         self.setUsesScrollButtons(True)
-
-    def init_expr_calc(self):
-        font = QtGui.QFont()
-        font.setPointSize(14)
-        label_font = QtGui.QFont()
-        label_font.setPointSize(18)
-
-        self.expr_label = QtWidgets.QLabel(self.tab)
-        self.expr_label.setGeometry(QtCore.QRect(10, 740, 91, 21))
-        self.expr_label.setFont(label_font)
-        self.expr_label.setText("expr")
-
-        self.expr_input_textEdit = QtWidgets.QTextEdit(self.tab)
-        self.expr_input_textEdit.setGeometry(QtCore.QRect(100, 740, 381, 31))
-        self.expr_input_textEdit.setFont(font)
-        self.expr_input_textEdit.setAcceptRichText(False)
-
-        self.expr_eq_label = QtWidgets.QLabel(self.tab)
-        self.expr_eq_label.setGeometry(QtCore.QRect(500, 740, 21, 21))
-        self.expr_eq_label.setFont(label_font)
-        self.expr_eq_label.setText("=")
-
-        self.expr_eq_textEdit = QtWidgets.QTextEdit(self.tab)
-        self.expr_eq_textEdit.setGeometry(QtCore.QRect(530, 740, 181, 31))
-        self.expr_eq_textEdit.setFont(font)
-        self.expr_eq_textEdit.setReadOnly(True)
-        self.expr_eq_textEdit.setAcceptRichText(False)
-
-        self.line_note.setGeometry(QtCore.QRect(40, 775, 631, 21))
 
     # tab(标签)关闭函数；
     def close_tab(self, index) -> None:
@@ -343,21 +248,6 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
                     self._record_history(op_id, [left_str, right_str], result)
         except Exception as e:
             eq_te.setText("illegal character")
-
-    def expr_input_textEdit_changed(self):
-        expr = self.expr_input_textEdit.toPlainText().strip()
-        if len(expr) == 0:
-            self.expr_eq_textEdit.clear()
-            return
-        if len(expr) > 512 or re.search(r'[^0-9a-fA-FxX+\-*/%&|^<>()~ \t\r\n]', expr):
-            self.expr_eq_textEdit.setText("illegal character")
-            return
-        try:
-            result = "0x%x" % (eval_int_expr(expr) & MASK64)
-            self.expr_eq_textEdit.setText(result)
-            self._record_history('expr', [expr], result)
-        except Exception:
-            self.expr_eq_textEdit.setText("illegal character")
 
     def calc_add_textEdit_changed(self):
         left_str = self.add_left_textEdit.toPlainText()
