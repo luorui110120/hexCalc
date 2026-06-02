@@ -48,6 +48,8 @@ OP_TABLE = {
     'float_from_hex':    {'label': 'hex→float',    'inputs': ['hex_float_textEdit'],    'outputs': ['float_float_textEdit', 'double_float_textEdit']},
     'not_from_left':  {'label': '~left',  'inputs': ['left_not_textEdit'],  'outputs': ['right_not_textEdit']},
     'not_from_right': {'label': '~right', 'inputs': ['right_not_textEdit'], 'outputs': ['left_not_textEdit']},
+    'ts_to_date':     {'label': 'ts→date', 'inputs': ['ts_textEdit'],   'outputs': ['date_textEdit']},
+    'date_to_ts':     {'label': 'date→ts', 'inputs': ['date_textEdit'], 'outputs': ['ts_textEdit']},
 }
 
 class HistoryDialog(QDialog):
@@ -158,7 +160,10 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
 
         self.bit_width = 64
         self._suppress_history = False
+        self._ts_unit = 's'
+        self._ts_signal_lock = False
         self.init_bitwidth_ui()
+        self.init_timestamp_ui()
 
         self.add_left_textEdit.textChanged.connect(self.calc_add_textEdit_changed)
         self.add_right_textEdit.textChanged.connect(self.calc_add_textEdit_changed)
@@ -201,31 +206,137 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
         self.setUsesScrollButtons(True)
 
     def init_bitwidth_ui(self):
-        label_font = QtGui.QFont()
-        label_font.setPointSize(18)
-        radio_font = QtGui.QFont()
-        radio_font.setPointSize(14)
-
-        self.bitwidth_label = QtWidgets.QLabel(self.tab)
-        self.bitwidth_label.setGeometry(QtCore.QRect(10, 740, 71, 31))
-        self.bitwidth_label.setFont(label_font)
-        self.bitwidth_label.setText("bits")
-
         self.bitwidth_group = QtWidgets.QButtonGroup(self.tab)
-        self._bitwidth_radios = {}
-        x = 90
-        for w in (8, 16, 32, 64):
-            rb = QtWidgets.QRadioButton(str(w), self.tab)
-            rb.setGeometry(QtCore.QRect(x, 745, 70, 25))
-            rb.setFont(radio_font)
-            if w == self.bit_width:
-                rb.setChecked(True)
+        self._bitwidth_radios = {
+            8: self.bitwidth_radio_8,
+            16: self.bitwidth_radio_16,
+            32: self.bitwidth_radio_32,
+            64: self.bitwidth_radio_64,
+        }
+        for w, rb in self._bitwidth_radios.items():
             self.bitwidth_group.addButton(rb, w)
-            self._bitwidth_radios[w] = rb
-            x += 75
+            rb.setChecked(w == self.bit_width)
         self.bitwidth_group.idClicked.connect(self._on_bitwidth_changed)
 
-        self.line_note.setGeometry(QtCore.QRect(40, 775, 631, 21))
+    def init_timestamp_ui(self):
+        self.ts_unit_group = QtWidgets.QButtonGroup(self.tab)
+        self.ts_unit_group.addButton(self.ts_unit_s_radio, 0)
+        self.ts_unit_group.addButton(self.ts_unit_ms_radio, 1)
+        self.ts_unit_group.idClicked.connect(self._on_ts_unit_changed)
+
+        self.ts_textEdit.textChanged.connect(self._on_ts_changed)
+        self.date_textEdit.textChanged.connect(self._on_date_changed)
+
+        now = int(time.time())
+        self._ts_signal_lock = True
+        try:
+            self.ts_textEdit.setPlainText(str(now))
+            self.date_textEdit.setPlainText(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)))
+        finally:
+            self._ts_signal_lock = False
+
+    def _on_ts_unit_changed(self, btn_id):
+        new_unit = 'ms' if btn_id == 1 else 's'
+        if new_unit == self._ts_unit:
+            return
+        self._ts_unit = new_unit
+        ts_str = self.ts_textEdit.toPlainText().strip()
+        if not ts_str:
+            return
+        try:
+            ts_val = int(ts_str)
+        except ValueError:
+            return
+        if new_unit == 'ms' and ts_val < 10 ** 12:
+            new_val = ts_val * 1000
+        elif new_unit == 's' and ts_val >= 10 ** 12:
+            new_val = ts_val // 1000
+        else:
+            self._on_ts_changed()
+            return
+        self._ts_signal_lock = True
+        try:
+            self.ts_textEdit.setPlainText(str(new_val))
+        finally:
+            self._ts_signal_lock = False
+        self._on_ts_changed()
+
+    def _on_ts_changed(self):
+        if self._ts_signal_lock:
+            return
+        ts_str = self.ts_textEdit.toPlainText().strip()
+        if not ts_str:
+            self._ts_signal_lock = True
+            try:
+                self.date_textEdit.setPlainText("")
+            finally:
+                self._ts_signal_lock = False
+            return
+        if not self.ts_textEdit.hasFocus():
+            return
+        try:
+            ts_val = int(ts_str)
+            if self._ts_unit == 'ms':
+                seconds = ts_val / 1000.0
+                ms = ts_val % 1000
+                date_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(seconds)) + (".%03d" % ms)
+            else:
+                date_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts_val))
+        except (ValueError, OSError, OverflowError):
+            self._ts_signal_lock = True
+            try:
+                self.date_textEdit.setPlainText("illegal character")
+            finally:
+                self._ts_signal_lock = False
+            return
+        self._ts_signal_lock = True
+        try:
+            self.date_textEdit.setPlainText(date_str)
+        finally:
+            self._ts_signal_lock = False
+        self._record_history('ts_to_date', [ts_str, self._ts_unit], date_str)
+
+    def _on_date_changed(self):
+        if self._ts_signal_lock:
+            return
+        date_str = self.date_textEdit.toPlainText().strip()
+        if not date_str:
+            self._ts_signal_lock = True
+            try:
+                self.ts_textEdit.setPlainText("")
+            finally:
+                self._ts_signal_lock = False
+            return
+        if not self.date_textEdit.hasFocus():
+            return
+        ms_part = 0
+        date_main = date_str
+        if '.' in date_str:
+            date_main, frac = date_str.rsplit('.', 1)
+            try:
+                ms_part = int((frac + '000')[:3])
+            except ValueError:
+                ms_part = 0
+        try:
+            t = time.strptime(date_main, "%Y-%m-%d %H:%M:%S")
+            seconds = int(time.mktime(t))
+        except (ValueError, OverflowError):
+            self._ts_signal_lock = True
+            try:
+                self.ts_textEdit.setPlainText("illegal character")
+            finally:
+                self._ts_signal_lock = False
+            return
+        if self._ts_unit == 'ms':
+            ts_val = seconds * 1000 + ms_part
+        else:
+            ts_val = seconds
+        self._ts_signal_lock = True
+        try:
+            self.ts_textEdit.setPlainText(str(ts_val))
+        finally:
+            self._ts_signal_lock = False
+        self._record_history('date_to_ts', [date_str, self._ts_unit], str(ts_val))
 
     def _mask(self):
         return (1 << self.bit_width) - 1
@@ -655,6 +766,12 @@ class MyMainForm(QTabWidget, Ui_TabWidget):
             return
         input_attrs = OP_TABLE[op]['inputs']
         input_values = record.get('inputs', [])
+        if op in ('ts_to_date', 'date_to_ts') and len(input_values) >= 2:
+            unit = input_values[1]
+            if unit in ('s', 'ms'):
+                target._ts_unit = unit
+                target.ts_unit_ms_radio.setChecked(unit == 'ms')
+                target.ts_unit_s_radio.setChecked(unit == 's')
         for attr, value in zip(input_attrs, input_values):
             widget = getattr(target, attr, None)
             if widget is not None:
